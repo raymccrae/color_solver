@@ -6,6 +6,7 @@ g++ -std=c++20 -O2 -Wall -Wextra -pedantic -o color_solver color_solver.cpp
 python3 - <<'PY'
 import subprocess
 import sys
+import time
 
 TESTS = [
     {
@@ -79,6 +80,28 @@ TESTS = [
 0
 """,
         "status": "SOLVABLE",
+    },
+    {
+        "name": "duplicate empty tubes keep original indices",
+        "input": """4 4
+2 1 2
+2 2 1
+0
+0
+""",
+        "status": "SOLVABLE",
+        "moves": 3,
+    },
+    {
+        "name": "canonical duplicate states preserve legal output",
+        "input": """4 4
+2 1 2
+2 1 2
+2 2 1
+2 2 1
+""",
+        "status": "SOLVABLE",
+        "moves": 6,
     },
 ]
 
@@ -169,6 +192,7 @@ def replay(puzzle_input, output):
     return status, count
 
 for test in TESTS:
+    started = time.perf_counter()
     proc = subprocess.run(
         ["./color_solver"],
         input=test["input"],
@@ -178,6 +202,7 @@ for test in TESTS:
         timeout=60,
         check=False,
     )
+    elapsed = time.perf_counter() - started
     if proc.returncode != 0:
         sys.stderr.write(proc.stderr)
         raise AssertionError(f"{test['name']}: solver exited with {proc.returncode}")
@@ -188,6 +213,8 @@ for test in TESTS:
     if "moves" in test and count != test["moves"]:
         raise AssertionError(f"{test['name']}: expected {test['moves']} moves, got {count}")
     print(f"PASS {test['name']}: {status}" + (f" {count}" if count is not None else ""))
+    if test["name"] == "today's Reddit screenshot fixture":
+        print(f"BENCH today's Reddit screenshot fixture: {elapsed:.3f}s")
 
 print("Tests: PASS")
 PY
