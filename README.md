@@ -8,7 +8,7 @@ The solver reads a puzzle from standard input and prints either an optimal seque
 
 - Finds a minimum-length solution using IDA*.
 - Uses one-based tube numbers in output, matching the input tube order.
-- Supports arbitrary puzzle sizes, including 12-tube and 16-tube screenshots.
+- Optimized for the fixed Reddit screenshot shape: 12 tubes, capacity 4, and 10 colors.
 - Moves bottom color runs, not top color runs.
 - Verifies invalid or unsolvable inputs as `UNSOLVABLE`.
 - Includes a replay-based verification script.
@@ -16,7 +16,7 @@ The solver reads a puzzle from standard input and prints either an optimal seque
 ## Build
 
 ```bash
-g++ -std=c++20 -O2 -Wall -Wextra -pedantic -o color_solver color_solver.cpp
+g++ -std=c++20 -O3 -Wall -Wextra -pedantic -o color_solver color_solver.cpp
 ```
 
 ## Run
@@ -29,9 +29,17 @@ Example:
 
 ```bash
 cat <<'EOF' | ./color_solver
-4 4
-4 1 2 1 2
-4 2 1 2 1
+12 4
+4 1 2 3 2
+4 4 5 2 6
+4 3 6 7 8
+4 5 8 5 7
+4 9 6 10 4
+4 6 1 4 1
+4 10 3 9 7
+4 8 9 5 2
+4 4 10 10 7
+4 3 9 1 8
 0
 0
 EOF
@@ -52,33 +60,41 @@ Move indices are **one-based** and refer to the original input tube order.
 ## Input Format
 
 ```text
-N C
+12 4
 k0 color color ...
 k1 color color ...
 ...
-kN-1 color color ...
+k11 color color ...
 ```
 
 Where:
 
-- `N` is the number of tubes.
-- `C` is the capacity of every tube.
+- The first line must be exactly `12 4`.
 - Each tube line starts with `k`, the number of blocks in that tube.
 - The following `k` integers are color IDs.
 - Tube contents are listed from **top to bottom**.
 - The final listed color is the tube bottom and is the movable end.
+- There must be exactly 10 distinct colors, each appearing exactly 4 times.
 
 Example:
 
 ```text
-4 4
-4 1 2 1 2
-4 2 1 2 1
+12 4
+4 1 2 3 2
+4 4 5 2 6
+4 3 6 7 8
+4 5 8 5 7
+4 9 6 10 4
+4 6 1 4 1
+4 10 3 9 7
+4 8 9 5 2
+4 4 10 10 7
+4 3 9 1 8
 0
 0
 ```
 
-This means tube 1 has top `1`, then `2`, then `1`, and bottom `2`.
+This means tube 1 has top `1`, then `2`, then `3`, and bottom `2`.
 
 ## Rules Solved
 
@@ -140,6 +156,8 @@ The solver uses IDA*:
 - Uses a transposition table within each iteration.
 - Canonicalizes state keys internally so equivalent tube permutations prune duplicate search.
 - Keeps the live state in original tube order so output indices remain user-friendly.
+- Stores each tube as one packed 16-bit value with four 4-bit color slots.
+- Stores a full game state as 12 packed tubes, for a 24-byte state.
 
 The heuristic is admissible:
 
@@ -153,5 +171,5 @@ h = max(non_monochromatic_tubes, split_color_lower_bound)
 
 - The program has no command-line flags.
 - Color IDs may be any non-negative integers.
-- The implementation remaps colors internally for speed.
+- The implementation remaps colors internally to values `1..10`; `0` is reserved for empty slots.
 - Generated binaries such as `color_solver` are build artifacts and should not be committed.

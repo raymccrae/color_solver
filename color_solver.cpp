@@ -1,34 +1,29 @@
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <iostream>
 #include <limits>
 #include <optional>
-#include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
-using Color = std::uint16_t;
+namespace {
+
+constexpr int kTubeCount = 12;
+constexpr int kCapacity = 4;
+constexpr int kColorCount = 10;
+constexpr int kMaxMoves = kTubeCount * (kTubeCount - 1);
+
+using Color = std::uint8_t;
+using Tube = std::uint16_t;
+using GameState = std::array<Tube, kTubeCount>;
+
+static_assert(sizeof(GameState) == 24);
 
 struct Move {
-    int from = -1;
-    int to = -1;
-};
-
-struct State {
-    int n = 0;
-    int capacity = 0;
-    std::vector<int> len;
-    std::vector<Color> cells;
-
-    Color at(int tube, int pos) const {
-        return cells[static_cast<std::size_t>(tube * capacity + pos)];
-    }
-
-    Color& at(int tube, int pos) {
-        return cells[static_cast<std::size_t>(tube * capacity + pos)];
-    }
+    std::uint8_t from = 0;
+    std::uint8_t to = 0;
 };
 
 struct TubeInfo {
@@ -37,7 +32,9 @@ struct TubeInfo {
     bool mono = true;
     bool complete = false;
     Color bottom = 0;
-    int run = 0;
+    std::uint8_t len = 0;
+    std::uint8_t run = 0;
+    std::uint16_t color_mask = 0;
 };
 
 struct SearchResult {
@@ -45,128 +42,130 @@ struct SearchResult {
     int next_bound = std::numeric_limits<int>::max();
 };
 
-struct Successor {
-    State state;
-    Move move;
+struct Key {
+    GameState tubes{};
+
+    bool operator==(const Key& other) const {
+        return tubes == other.tubes;
+    }
+};
+
+struct KeyHash {
+    std::size_t operator()(const Key& key) const {
+        std::uint64_t h = 1469598103934665603ULL;
+        for (Tube tube : key.tubes) {
+            h ^= static_cast<std::uint64_t>(tube & 0xffU);
+            h *= 1099511628211ULL;
+            h ^= static_cast<std::uint64_t>(tube >> 8U);
+            h *= 1099511628211ULL;
+        }
+        return static_cast<std::size_t>(h);
+    }
+};
+
+struct Candidate {
+    Move move{};
     int h = 0;
-    int amount = 0;
+    std::uint8_t amount = 0;
     bool to_empty = false;
 };
 
-namespace {
+struct CandidateList {
+    std::array<Candidate, kMaxMoves> items{};
+    int count = 0;
+};
 
-int color_count_g = 0;
-
-State make_state(int n, int capacity) {
-    State st;
-    st.n = n;
-    st.capacity = capacity;
-    st.len.assign(static_cast<std::size_t>(n), 0);
-    st.cells.assign(static_cast<std::size_t>(n * capacity), 0);
-    return st;
+Color slot(Tube tube, int pos) {
+    return static_cast<Color>((tube >> (pos * 4)) & 0x0fU);
 }
 
-TubeInfo inspect_tube(const State& state, int tube) {
+void set_slot(Tube& tube, int pos, Color color) {
+    Tube mask = static_cast<Tube>(0x0fU << (pos * 4));
+    tube = static_cast<Tube>((tube & ~mask) | (static_cast<Tube>(color) << (pos * 4)));
+}
+
+Tube make_tube(const std::array<Color, kCapacity>& colors, int len) {
+    Tube tube = 0;
+    for (int i = 0; i < len; ++i) {
+        set_slot(tube, i, colors[static_cast<std::size_t>(i)]);
+    }
+    return tube;
+}
+
+TubeInfo inspect_tube(Tube tube) {
     TubeInfo info;
-    int length = state.len[static_cast<std::size_t>(tube)];
-    info.empty = length == 0;
-    info.full = length == state.capacity;
+    Color first = 0;
+
+    for (int i = 0; i < kCapacity; ++i) {
+        Color color = slot(tube, i);
+        if (color == 0) break;
+        if (info.len == 0) first = color;
+        if (color != first) info.mono = false;
+        info.color_mask = static_cast<std::uint16_t>(info.color_mask | (1U << color));
+        ++info.len;
+    }
+
+    info.empty = info.len == 0;
+    info.full = info.len == kCapacity;
     if (info.empty) return info;
 
-    Color first = state.at(tube, 0);
-    info.bottom = state.at(tube, length - 1);
-    info.mono = true;
-    for (int i = 1; i < length; ++i) {
-        if (state.at(tube, i) != first) {
-            info.mono = false;
-            break;
-        }
-    }
-    for (int i = length - 1; i >= 0 && state.at(tube, i) == info.bottom; --i) {
+    info.bottom = slot(tube, info.len - 1);
+    for (int i = info.len - 1; i >= 0 && slot(tube, i) == info.bottom; --i) {
         ++info.run;
     }
     info.complete = info.full && info.mono;
     return info;
 }
 
-bool is_goal(const State& state) {
-    std::vector<bool> seen(static_cast<std::size_t>(color_count_g), false);
-    for (int t = 0; t < state.n; ++t) {
-        TubeInfo info = inspect_tube(state, t);
+std::array<TubeInfo, kTubeCount> inspect_state(const GameState& state) {
+    std::array<TubeInfo, kTubeCount> info{};
+    for (int t = 0; t < kTubeCount; ++t) {
+        info[static_cast<std::size_t>(t)] = inspect_tube(state[static_cast<std::size_t>(t)]);
+    }
+    return info;
+}
+
+bool is_goal(const GameState& state) {
+    std::uint16_t seen = 0;
+    for (Tube tube : state) {
+        TubeInfo info = inspect_tube(tube);
         if (info.empty) continue;
         if (!info.mono) return false;
-        Color color = state.at(t, 0);
-        if (seen[static_cast<std::size_t>(color)]) return false;
-        seen[static_cast<std::size_t>(color)] = true;
+        std::uint16_t bit = static_cast<std::uint16_t>(1U << info.bottom);
+        if ((seen & bit) != 0) return false;
+        seen = static_cast<std::uint16_t>(seen | bit);
     }
     return true;
 }
 
-int heuristic(const State& state) {
+int heuristic(const GameState& state) {
     int non_mono = 0;
-    std::vector<bool> color_in_tube(static_cast<std::size_t>(color_count_g), false);
-    std::vector<int> tubes_containing_color(static_cast<std::size_t>(color_count_g), 0);
+    std::array<std::uint8_t, kColorCount + 1> tubes_containing_color{};
 
-    for (int t = 0; t < state.n; ++t) {
-        TubeInfo info = inspect_tube(state, t);
+    for (Tube tube : state) {
+        TubeInfo info = inspect_tube(tube);
         if (!info.mono) ++non_mono;
 
-        std::fill(color_in_tube.begin(), color_in_tube.end(), false);
-        int length = state.len[static_cast<std::size_t>(t)];
-        for (int i = 0; i < length; ++i) {
-            Color color = state.at(t, i);
-            if (!color_in_tube[static_cast<std::size_t>(color)]) {
-                color_in_tube[static_cast<std::size_t>(color)] = true;
-                ++tubes_containing_color[static_cast<std::size_t>(color)];
-            }
+        std::uint16_t mask = info.color_mask;
+        while (mask != 0) {
+            int color = __builtin_ctz(mask);
+            ++tubes_containing_color[static_cast<std::size_t>(color)];
+            mask = static_cast<std::uint16_t>(mask & (mask - 1));
         }
     }
 
     int split_color_lower_bound = 0;
-    for (int count : tubes_containing_color) {
+    for (int color = 1; color <= kColorCount; ++color) {
+        int count = tubes_containing_color[static_cast<std::size_t>(color)];
         if (count > 1) split_color_lower_bound += count - 1;
     }
     return std::max(non_mono, split_color_lower_bound);
 }
 
-void append_u16(std::string& out, std::uint16_t value) {
-    out.push_back(static_cast<char>(value & 0xffU));
-    out.push_back(static_cast<char>((value >> 8U) & 0xffU));
-}
-
-void append_u32(std::string& out, std::uint32_t value) {
-    out.push_back(static_cast<char>(value & 0xffU));
-    out.push_back(static_cast<char>((value >> 8U) & 0xffU));
-    out.push_back(static_cast<char>((value >> 16U) & 0xffU));
-    out.push_back(static_cast<char>((value >> 24U) & 0xffU));
-}
-
-std::string tube_key(const State& state, int tube) {
-    std::string out;
-    int length = state.len[static_cast<std::size_t>(tube)];
-    out.reserve(static_cast<std::size_t>(4 + 2 * length));
-    append_u32(out, static_cast<std::uint32_t>(length));
-    for (int i = 0; i < length; ++i) {
-        append_u16(out, state.at(tube, i));
-    }
-    return out;
-}
-
-std::string encode_state(const State& state) {
-    std::vector<std::string> tubes;
-    tubes.reserve(static_cast<std::size_t>(state.n));
-    for (int t = 0; t < state.n; ++t) {
-        tubes.push_back(tube_key(state, t));
-    }
-    std::sort(tubes.begin(), tubes.end());
-
-    std::string out;
-    out.reserve(static_cast<std::size_t>(state.n * (5 + 2 * state.capacity)));
-    for (const std::string& tube : tubes) {
-        out.append(tube);
-        out.push_back('\xff');
-    }
-    return out;
+Key encode_state(const GameState& state) {
+    Key key{state};
+    std::sort(key.tubes.begin(), key.tubes.end());
+    return key;
 }
 
 bool can_move(const TubeInfo& src, const TubeInfo& dst) {
@@ -174,53 +173,77 @@ bool can_move(const TubeInfo& src, const TubeInfo& dst) {
     return dst.empty || dst.bottom == src.bottom;
 }
 
-void apply_move(State& state, int from, int to, int amount) {
-    int from_len = state.len[static_cast<std::size_t>(from)];
-    int to_len = state.len[static_cast<std::size_t>(to)];
+void apply_move(GameState& state, const std::array<TubeInfo, kTubeCount>& info, int from, int to, int amount) {
+    Tube& src = state[static_cast<std::size_t>(from)];
+    Tube& dst = state[static_cast<std::size_t>(to)];
+    int from_len = info[static_cast<std::size_t>(from)].len;
+    int to_len = info[static_cast<std::size_t>(to)].len;
+
     for (int i = 0; i < amount; ++i) {
-        state.at(to, to_len + i) = state.at(from, from_len - 1 - i);
+        set_slot(dst, to_len + i, slot(src, from_len - 1 - i));
+        set_slot(src, from_len - 1 - i, 0);
     }
-    state.len[static_cast<std::size_t>(from)] = from_len - amount;
-    state.len[static_cast<std::size_t>(to)] = to_len + amount;
 }
 
-std::vector<Successor> next_states(const State& state, const std::string& previous_key) {
-    std::vector<Successor> result;
-    std::unordered_set<std::string> generated;
-    std::vector<TubeInfo> info(static_cast<std::size_t>(state.n));
-    for (int t = 0; t < state.n; ++t) {
-        info[static_cast<std::size_t>(t)] = inspect_tube(state, t);
-    }
+void apply_move(GameState& state, int from, int to, int amount) {
+    TubeInfo src_info = inspect_tube(state[static_cast<std::size_t>(from)]);
+    TubeInfo dst_info = inspect_tube(state[static_cast<std::size_t>(to)]);
+    Tube& src = state[static_cast<std::size_t>(from)];
+    Tube& dst = state[static_cast<std::size_t>(to)];
 
-    for (int s = 0; s < state.n; ++s) {
+    for (int i = 0; i < amount; ++i) {
+        set_slot(dst, dst_info.len + i, slot(src, src_info.len - 1 - i));
+        set_slot(src, src_info.len - 1 - i, 0);
+    }
+}
+
+bool contains_generated(const std::array<Key, kMaxMoves>& generated, int count, const Key& key) {
+    for (int i = 0; i < count; ++i) {
+        if (generated[static_cast<std::size_t>(i)] == key) return true;
+    }
+    return false;
+}
+
+CandidateList next_moves(const GameState& state, const std::optional<Key>& previous_key) {
+    CandidateList result;
+    std::array<Key, kMaxMoves> generated{};
+    int generated_count = 0;
+    std::array<TubeInfo, kTubeCount> info = inspect_state(state);
+
+    for (int s = 0; s < kTubeCount; ++s) {
         const TubeInfo& src = info[static_cast<std::size_t>(s)];
         if (src.empty || src.complete) continue;
 
-        for (int d = 0; d < state.n; ++d) {
+        for (int d = 0; d < kTubeCount; ++d) {
             if (s == d) continue;
             const TubeInfo& dst = info[static_cast<std::size_t>(d)];
             if (!can_move(src, dst)) continue;
 
-            int space = state.capacity - state.len[static_cast<std::size_t>(d)];
-            int amount = std::min(src.run, space);
+            int space = kCapacity - dst.len;
+            int amount = std::min<int>(src.run, space);
             if (amount <= 0) continue;
 
-            bool whole_source = amount == state.len[static_cast<std::size_t>(s)];
+            bool whole_source = amount == src.len;
             if (dst.empty && src.mono && whole_source) continue;
 
-            State child = state;
-            apply_move(child, s, d, amount);
+            GameState child = state;
+            apply_move(child, info, s, d, amount);
 
-            std::string key = encode_state(child);
-            if (!previous_key.empty() && key == previous_key) continue;
-            if (!generated.insert(key).second) continue;
+            Key key = encode_state(child);
+            if (previous_key && key == *previous_key) continue;
+            if (contains_generated(generated, generated_count, key)) continue;
+            generated[static_cast<std::size_t>(generated_count++)] = key;
 
-            result.push_back(Successor{std::move(child), Move{s, d}, 0, amount, dst.empty});
-            result.back().h = heuristic(result.back().state);
+            result.items[static_cast<std::size_t>(result.count++)] = Candidate{
+                Move{static_cast<std::uint8_t>(s), static_cast<std::uint8_t>(d)},
+                heuristic(child),
+                static_cast<std::uint8_t>(amount),
+                dst.empty
+            };
         }
     }
 
-    std::sort(result.begin(), result.end(), [](const Successor& a, const Successor& b) {
+    std::sort(result.items.begin(), result.items.begin() + result.count, [](const Candidate& a, const Candidate& b) {
         if (a.h != b.h) return a.h < b.h;
         if (a.to_empty != b.to_empty) return !a.to_empty && b.to_empty;
         return a.amount > b.amount;
@@ -230,11 +253,11 @@ std::vector<Successor> next_states(const State& state, const std::string& previo
 }
 
 SearchResult dfs_ida(
-    const State& state,
+    GameState& state,
     int g,
     int bound,
-    const std::string& previous_key,
-    std::unordered_map<std::string, int>& best_depth,
+    const std::optional<Key>& previous_key,
+    std::unordered_map<Key, std::uint8_t, KeyHash>& best_depth,
     std::vector<Move>& path
 ) {
     int h = heuristic(state);
@@ -242,35 +265,42 @@ SearchResult dfs_ida(
     if (f > bound) return SearchResult{false, f};
     if (is_goal(state)) return SearchResult{true, bound};
 
-    std::string key = encode_state(state);
+    Key key = encode_state(state);
     auto it = best_depth.find(key);
     if (it != best_depth.end() && it->second <= g) {
         return SearchResult{false, std::numeric_limits<int>::max()};
     }
-    best_depth[key] = g;
+    best_depth[key] = static_cast<std::uint8_t>(g);
 
     int min_exceeded = std::numeric_limits<int>::max();
-    std::vector<Successor> successors = next_states(state, previous_key);
-    for (const Successor& succ : successors) {
-        path.push_back(succ.move);
-        SearchResult r = dfs_ida(succ.state, g + 1, bound, key, best_depth, path);
+    CandidateList candidates = next_moves(state, previous_key);
+    for (int i = 0; i < candidates.count; ++i) {
+        const Candidate& candidate = candidates.items[static_cast<std::size_t>(i)];
+        Tube old_from = state[static_cast<std::size_t>(candidate.move.from)];
+        Tube old_to = state[static_cast<std::size_t>(candidate.move.to)];
+        apply_move(state, candidate.move.from, candidate.move.to, candidate.amount);
+
+        path.push_back(candidate.move);
+        SearchResult r = dfs_ida(state, g + 1, bound, key, best_depth, path);
         if (r.found) return r;
         path.pop_back();
+        state[static_cast<std::size_t>(candidate.move.from)] = old_from;
+        state[static_cast<std::size_t>(candidate.move.to)] = old_to;
         min_exceeded = std::min(min_exceeded, r.next_bound);
     }
 
     return SearchResult{false, min_exceeded};
 }
 
-std::optional<std::vector<Move>> solve(const State& initial) {
+std::optional<std::vector<Move>> solve(GameState initial) {
     if (is_goal(initial)) return std::vector<Move>{};
 
     int bound = heuristic(initial);
     std::vector<Move> path;
 
     while (bound < std::numeric_limits<int>::max()) {
-        std::unordered_map<std::string, int> best_depth;
-        SearchResult r = dfs_ida(initial, 0, bound, "", best_depth, path);
+        std::unordered_map<Key, std::uint8_t, KeyHash> best_depth;
+        SearchResult r = dfs_ida(initial, 0, bound, std::nullopt, best_depth, path);
         if (r.found) return path;
         if (r.next_bound == std::numeric_limits<int>::max()) break;
         bound = r.next_bound;
@@ -280,62 +310,68 @@ std::optional<std::vector<Move>> solve(const State& initial) {
     return std::nullopt;
 }
 
-bool read_input(State& state) {
+bool read_input(GameState& state) {
     int n = 0;
     int capacity = 0;
     if (!(std::cin >> n >> capacity)) return false;
-    if (n <= 0 || capacity <= 0) return false;
-    if (static_cast<long long>(n) * capacity > std::numeric_limits<int>::max()) return false;
+    if (n != kTubeCount || capacity != kCapacity) return false;
 
-    std::vector<std::vector<int>> raw(static_cast<std::size_t>(n));
-    std::unordered_map<int, int> counts;
+    std::array<std::array<int, kCapacity>, kTubeCount> raw{};
+    std::array<int, kTubeCount> lengths{};
+    std::array<int, kTubeCount * kCapacity> seen_colors{};
+    std::array<int, kTubeCount * kCapacity> seen_counts{};
+    int distinct_colors = 0;
 
-    for (int i = 0; i < n; ++i) {
+    for (int t = 0; t < kTubeCount; ++t) {
         int k = -1;
         if (!(std::cin >> k)) return false;
-        if (k < 0 || k > capacity) return false;
+        if (k < 0 || k > kCapacity) return false;
+        lengths[static_cast<std::size_t>(t)] = k;
 
-        raw[static_cast<std::size_t>(i)].reserve(static_cast<std::size_t>(k));
-        for (int j = 0; j < k; ++j) {
+        for (int i = 0; i < k; ++i) {
             int color = -1;
             if (!(std::cin >> color)) return false;
             if (color < 0) return false;
-            raw[static_cast<std::size_t>(i)].push_back(color);
-            ++counts[color];
+            raw[static_cast<std::size_t>(t)][static_cast<std::size_t>(i)] = color;
+
+            int index = -1;
+            for (int c = 0; c < distinct_colors; ++c) {
+                if (seen_colors[static_cast<std::size_t>(c)] == color) {
+                    index = c;
+                    break;
+                }
+            }
+            if (index == -1) {
+                if (distinct_colors == kColorCount) return false;
+                index = distinct_colors++;
+                seen_colors[static_cast<std::size_t>(index)] = color;
+            }
+            ++seen_counts[static_cast<std::size_t>(index)];
         }
     }
 
-    int expected_count = -1;
-    for (const auto& [color, count] : counts) {
-        (void)color;
-        if (count <= 0 || count > capacity) return false;
-        if (expected_count == -1) expected_count = count;
-        if (count != expected_count) return false;
+    if (distinct_colors != kColorCount) return false;
+    for (int c = 0; c < distinct_colors; ++c) {
+        if (seen_counts[static_cast<std::size_t>(c)] != kCapacity) return false;
     }
 
-    std::vector<int> colors;
-    colors.reserve(counts.size());
-    for (const auto& [color, count] : counts) {
-        (void)count;
-        colors.push_back(color);
+    std::array<int, kColorCount> colors{};
+    for (int c = 0; c < kColorCount; ++c) {
+        colors[static_cast<std::size_t>(c)] = seen_colors[static_cast<std::size_t>(c)];
     }
     std::sort(colors.begin(), colors.end());
-    if (colors.size() > std::numeric_limits<Color>::max()) return false;
 
-    std::unordered_map<int, Color> remap;
-    remap.reserve(colors.size());
-    for (std::size_t i = 0; i < colors.size(); ++i) {
-        remap[colors[i]] = static_cast<Color>(i);
-    }
-    color_count_g = static_cast<int>(colors.size());
-
-    state = make_state(n, capacity);
-    for (int t = 0; t < n; ++t) {
-        const std::vector<int>& tube = raw[static_cast<std::size_t>(t)];
-        state.len[static_cast<std::size_t>(t)] = static_cast<int>(tube.size());
-        for (std::size_t i = 0; i < tube.size(); ++i) {
-            state.at(t, static_cast<int>(i)) = remap[tube[i]];
+    state = {};
+    for (int t = 0; t < kTubeCount; ++t) {
+        std::array<Color, kCapacity> remapped{};
+        int len = lengths[static_cast<std::size_t>(t)];
+        for (int i = 0; i < len; ++i) {
+            int color = raw[static_cast<std::size_t>(t)][static_cast<std::size_t>(i)];
+            auto it = std::lower_bound(colors.begin(), colors.end(), color);
+            if (it == colors.end() || *it != color) return false;
+            remapped[static_cast<std::size_t>(i)] = static_cast<Color>((it - colors.begin()) + 1);
         }
+        state[static_cast<std::size_t>(t)] = make_tube(remapped, len);
     }
 
     return true;
@@ -344,7 +380,7 @@ bool read_input(State& state) {
 }  // namespace
 
 int main() {
-    State initial;
+    GameState initial{};
 
     if (!read_input(initial)) {
         std::cout << "UNSOLVABLE\n";
@@ -360,7 +396,7 @@ int main() {
     std::cout << "SOLVABLE\n";
     std::cout << solution->size() << '\n';
     for (const Move& move : *solution) {
-        std::cout << (move.from + 1) << ' ' << (move.to + 1) << '\n';
+        std::cout << static_cast<int>(move.from + 1) << ' ' << static_cast<int>(move.to + 1) << '\n';
     }
 
     return 0;

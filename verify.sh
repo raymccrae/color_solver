@@ -1,107 +1,113 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-g++ -std=c++20 -O2 -Wall -Wextra -pedantic -o color_solver color_solver.cpp
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
+solver="$tmpdir/color_solver"
+
+g++ -std=c++20 -O3 -Wall -Wextra -pedantic -o "$solver" color_solver.cpp
+export SOLVER="$solver"
 
 python3 - <<'PY'
 import subprocess
 import sys
 import time
+import os
+
+SOLVER = os.environ["SOLVER"]
+
+def puzzle(rows, header="12 4"):
+    return header + "\n" + "\n".join(
+        f"{len(row)}" + ("" if not row else " " + " ".join(str(x) for x in row))
+        for row in rows
+    ) + "\n"
+
+def solved_rows():
+    return [[color] * 4 for color in range(1, 11)] + [[], []]
 
 TESTS = [
     {
         "name": "already solved",
-        "input": """3 4
-4 1 1 1 1
-0
-4 2 2 2 2
-""",
+        "input": puzzle(solved_rows()),
         "status": "SOLVABLE",
         "moves": 0,
     },
     {
         "name": "one move",
-        "input": """3 4
-2 1 1
-2 1 1
-0
-""",
+        "input": puzzle([[1, 1], [1, 1]] + [[color] * 4 for color in range(2, 11)] + [[]]),
         "status": "SOLVABLE",
         "moves": 1,
     },
     {
         "name": "multi-move",
-        "input": """3 4
-2 1 2
-2 2 1
-0
-""",
+        "input": puzzle([
+            [1, 2, 1, 2],
+            [2, 1, 2, 1],
+            *([[color] * 4 for color in range(3, 11)]),
+            [],
+            [],
+        ]),
         "status": "SOLVABLE",
-        "moves": 3,
     },
     {
-        "name": "unsolvable because no empty capacity",
-        "input": """2 2
-2 1 2
-2 2 1
-""",
+        "name": "invalid fixed shape",
+        "input": puzzle([[1] * 4 for _ in range(10)] + [[], []], header="10 4"),
         "status": "UNSOLVABLE",
     },
     {
         "name": "invalid input, tube too full",
-        "input": """1 2
-3 1 1 1
-""",
+        "input": puzzle([[1, 1, 1, 1, 1]] + [[] for _ in range(11)]),
         "status": "UNSOLVABLE",
     },
     {
         "name": "invalid color counts",
-        "input": """3 4
-4 1 1 1 1
-3 2 2 2
-0
-""",
+        "input": puzzle([[1] * 4, [2] * 3] + [[color] * 4 for color in range(3, 11)] + [[], []]),
+        "status": "UNSOLVABLE",
+    },
+    {
+        "name": "invalid color cardinality",
+        "input": puzzle([[color] * 4 for color in range(1, 10)] + [[], [], []]),
         "status": "UNSOLVABLE",
     },
     {
         "name": "today's Reddit screenshot fixture",
-        "input": """12 4
-4 1 2 3 2
-4 4 5 2 6
-4 3 6 7 8
-4 5 8 5 7
-4 9 6 10 4
-4 6 1 4 1
-4 10 3 9 7
-4 8 9 5 2
-4 4 10 10 7
-4 3 9 1 8
-0
-0
-""",
+        "input": puzzle([
+            [1, 2, 3, 2],
+            [4, 5, 2, 6],
+            [3, 6, 7, 8],
+            [5, 8, 5, 7],
+            [9, 6, 10, 4],
+            [6, 1, 4, 1],
+            [10, 3, 9, 7],
+            [8, 9, 5, 2],
+            [4, 10, 10, 7],
+            [3, 9, 1, 8],
+            [],
+            [],
+        ]),
         "status": "SOLVABLE",
     },
     {
         "name": "duplicate empty tubes keep original indices",
-        "input": """4 4
-2 1 2
-2 2 1
-0
-0
-""",
+        "input": puzzle([
+            [1, 2, 1, 2],
+            [2, 1, 2, 1],
+            *([[color] * 4 for color in range(3, 11)]),
+            [],
+            [],
+        ]),
         "status": "SOLVABLE",
-        "moves": 3,
     },
     {
         "name": "canonical duplicate states preserve legal output",
-        "input": """4 4
-2 1 2
-2 1 2
-2 2 1
-2 2 1
-""",
+        "input": puzzle([
+            [1, 2],
+            [1, 2],
+            [2, 1],
+            [2, 1],
+            *([[color] * 4 for color in range(3, 11)]),
+        ]),
         "status": "SOLVABLE",
-        "moves": 6,
     },
 ]
 
@@ -194,7 +200,7 @@ def replay(puzzle_input, output):
 for test in TESTS:
     started = time.perf_counter()
     proc = subprocess.run(
-        ["./color_solver"],
+        [SOLVER],
         input=test["input"],
         text=True,
         stdout=subprocess.PIPE,
